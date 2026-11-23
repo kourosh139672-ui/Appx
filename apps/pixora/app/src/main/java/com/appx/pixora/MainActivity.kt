@@ -9,12 +9,12 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -29,12 +29,22 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
-private data class Photo(val id: Int, val title: String, val url: String)
-
-private val samplePhotos = (1..24).map { id ->
-    Photo(id, "Photo $id", "https://picsum.photos/seed/pixora$id/700/900")
-}
+private data class Photo(
+    val id: String,
+    val title: String,
+    val thumbnail: String,
+    val imageUrl: String,
+    val pageUrl: String,
+    val creator: String,
+    val license: String
+)
 
 class MainActivity : ComponentActivity() {
     private var incomingUri by mutableStateOf<Uri?>(null)
@@ -60,22 +70,79 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private suspend fun searchOpenverse(term: String, page: Int = 1): List<Photo> =
+    withContext(Dispatchers.IO) {
+        val encoded = URLEncoder.encode(term, "UTF-8")
+        val url = URL("https://api.openverse.org/v1/images/?q=$encoded&page=$page&page_size=30")
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12000
+            readTimeout = 18000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "PixoraAndroid/1.0")
+        }
+        try {
+            if (connection.responseCode !in 200..299) {
+                throw IllegalStateException("سرویس عکس پاسخ نداد (${connection.responseCode})")
+            }
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val results = JSONObject(body).optJSONArray("results") ?: return@withContext emptyList()
+            buildList {
+                for (i in 0 until results.length()) {
+                    val item = results.optJSONObject(i) ?: continue
+                    val thumb = item.optString("thumbnail")
+                    val image = item.optString("url")
+                    if (thumb.isBlank() || image.isBlank() || thumb == "null" || image == "null") continue
+                    add(
+                        Photo(
+                            id = item.optString("id", "$i"),
+                            title = item.optString("title").ifBlank { "بدون عنوان" },
+                            thumbnail = thumb,
+                            imageUrl = image,
+                            pageUrl = item.optString("foreign_landing_url"),
+                            creator = item.optString("creator").ifBlank { "نامشخص" },
+                            license = item.optString("license").ifBlank { "مجوز نامشخص" }
+                        )
+                    )
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PixoraApp(incomingUri: Uri?) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("pixora", Context.MODE_PRIVATE) }
     val favorites = remember {
-        mutableStateListOf<Int>().apply {
-            addAll(prefs.getStringSet("favorites", emptySet())!!.mapNotNull { it.toIntOrNull() })
+        mutableStateListOf<String>().apply {
+            addAll(prefs.getStringSet("favorites", emptySet()).orEmpty())
         }
     }
-    var tab by remember { mutableStateOf(0) }
-    var query by remember { mutableStateOf("") }
+    var tab by remember { mutableIntStateOf(0) }
+    var query by remember { mutableStateOf("nature") }
+    var submittedQuery by remember { mutableStateOf("nature") }
+    var photos by remember { mutableStateOf<List<Photo>>(emptyList()) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
     var sharedPhoto by remember(incomingUri) { mutableStateOf(incomingUri) }
 
-    val visiblePhotos = (if (tab == 1) samplePhotos.filter { it.id in favorites } else samplePhotos)
-        .filter { it.title.contains(query, ignoreCase = true) }
+    LaunchedEffect(submittedQuery) {
+        loading = true
+        error = null
+        try {
+            photos = searchOpenverse(submittedQuery)
+        } catch (e: Exception) {
+            error = e.message ?: "ارتباط با سرویس عکس برقرار نشد."
+            photos = emptyList()
+        } finally {
+            loading = false
+        }
+    }
+
+    val visiblePhotos = if (tab == 1) photos.filter { it.id in favorites } else photos
 
     MaterialTheme(
         colorScheme = lightColorScheme(
@@ -90,59 +157,83 @@ private fun PixoraApp(incomingUri: Uri?) {
                     title = {
                         Column {
                             Text("Pixora", fontWeight = FontWeight.ExtraBold)
-                            Text("دنیای عکس‌ها", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            Text("جست‌وجوی عکس در Openverse", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary)
                         }
                     },
                     actions = {
-                        IconButton(onClick = {
-                            Toast.makeText(context, "عکس‌ها فعلاً نمونه هستند؛ اتصال سرویس آنلاین در مرحله بعد انجام می‌شود.", Toast.LENGTH_LONG).show()
-                        }) { Icon(Icons.Default.Cloud, contentDescription = "Online") }
+                        IconButton(onClick = { submittedQuery = query.ifBlank { "nature" } }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "تازه‌سازی")
+                        }
                     }
                 )
             },
             bottomBar = {
                 NavigationBar {
-                    NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = { Icon(Icons.Default.Explore, null) }, label = { Text("اکتشاف") })
-                    NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Icon(Icons.Default.Favorite, null) }, label = { Text("پسندیده‌ها") })
+                    NavigationBarItem(selected = tab == 0, onClick = { tab = 0 },
+                        icon = { Icon(Icons.Default.Explore, null) }, label = { Text("اکتشاف") })
+                    NavigationBarItem(selected = tab == 1, onClick = { tab = 1 },
+                        icon = { Icon(Icons.Default.Favorite, null) }, label = { Text("پسندیده‌ها") })
                 }
             }
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 14.dp)) {
                 if (sharedPhoto != null) {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFEDEAFF)),
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-                    ) {
-                        Column(Modifier.padding(14.dp)) {
+                    Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                        Column(Modifier.padding(12.dp)) {
                             Text("یک عکس از برنامه‌ای دیگر دریافت شد", fontWeight = FontWeight.Bold)
-                            Text("می‌توانی آن را برای خودت نگه داری. هنوز جایی منتشر نشده.")
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = {
-                                    Toast.makeText(context, "عکس دریافتی آماده مشاهده است.", Toast.LENGTH_SHORT).show()
-                                    sharedPhoto = null
-                                }) { Text("متوجه شدم") }
-                                TextButton(onClick = { sharedPhoto = null }) { Text("بستن") }
-                            }
+                            Text("این عکس فقط از طریق اشتراک‌گذاری خودت به Pixora رسیده است.")
+                            TextButton(onClick = { sharedPhoto = null }) { Text("بستن") }
                         }
                     }
                 }
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 10.dp),
-                    placeholder = { Text("جست‌وجو در عکس‌ها...") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+                    placeholder = { Text("مثلاً cat, nature, ocean...") },
                     leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = {
+                        IconButton(onClick = { submittedQuery = query.trim().ifBlank { "nature" }; tab = 0 }) {
+                            Icon(Icons.Default.ArrowForward, contentDescription = "جست‌وجو")
+                        }
+                    },
                     singleLine = true,
                     shape = RoundedCornerShape(18.dp)
                 )
-                if (tab == 1 && visiblePhotos.isEmpty()) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("طبیعت" to "nature", "گربه" to "cat", "دریا" to "ocean",
+                        "فضا" to "space", "ماشین" to "car", "گل" to "flower").forEach { (label, value) ->
+                        FilterChip(
+                            selected = submittedQuery == value && tab == 0,
+                            onClick = { query = value; submittedQuery = value; tab = 0 },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                when {
+                    loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                    error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(error ?: "خطا")
+                            Text("ممکن است سرویس Openverse موقتاً در دسترس نباشد.")
+                            Button(onClick = { submittedQuery = query.trim().ifBlank { "nature" } }) {
+                                Text("تلاش دوباره")
+                            }
+                        }
+                    }
+                    tab == 1 && visiblePhotos.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("هنوز عکسی پسندیده نشده ❤️")
                     }
-                } else {
-                    LazyVerticalGrid(
+                    visiblePhotos.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("عکسی پیدا نشد. عبارت دیگری را امتحان کن.")
+                    }
+                    else -> LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
-                        contentPadding = PaddingValues(bottom = 18.dp),
+                        contentPadding = PaddingValues(top = 12.dp, bottom = 18.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
@@ -152,9 +243,14 @@ private fun PixoraApp(incomingUri: Uri?) {
                                 liked = photo.id in favorites,
                                 onLike = {
                                     if (photo.id in favorites) favorites.remove(photo.id) else favorites.add(photo.id)
-                                    prefs.edit().putStringSet("favorites", favorites.map { it.toString() }.toSet()).apply()
+                                    prefs.edit().putStringSet("favorites", favorites.toSet()).apply()
                                 },
-                                onDownload = { downloadPhoto(context, photo) }
+                                onDownload = { downloadPhoto(context, photo) },
+                                onOpen = {
+                                    if (photo.pageUrl.isNotBlank()) {
+                                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(photo.pageUrl))) }
+                                    }
+                                }
                             )
                         }
                     }
@@ -165,26 +261,38 @@ private fun PixoraApp(incomingUri: Uri?) {
 }
 
 @Composable
-private fun PhotoCard(photo: Photo, liked: Boolean, onLike: () -> Unit, onDownload: () -> Unit) {
+private fun PhotoCard(
+    photo: Photo,
+    liked: Boolean,
+    onLike: () -> Unit,
+    onDownload: () -> Unit,
+    onOpen: () -> Unit
+) {
     Card(shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(2.dp)) {
         Column {
             AsyncImage(
-                model = photo.url,
+                model = photo.thumbnail,
                 contentDescription = photo.title,
-                modifier = Modifier.fillMaxWidth().height(210.dp).clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)),
+                modifier = Modifier.fillMaxWidth().height(190.dp).clip(
+                    RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)),
                 contentScale = ContentScale.Crop
             )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(photo.title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                IconButton(onClick = onLike) {
-                    Icon(if (liked) Icons.Default.Favorite else Icons.Default.FavoriteBorder, contentDescription = "Like",
-                        tint = if (liked) Color(0xFFE64A72) else Color.Gray)
-                }
-                IconButton(onClick = onDownload) {
-                    Icon(Icons.Default.Download, contentDescription = "Download")
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
+                Text(photo.title, style = MaterialTheme.typography.labelMedium, maxLines = 2)
+                Text("عکاس: ${photo.creator}", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                Text("مجوز: ${photo.license}", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onLike, modifier = Modifier.weight(1f)) {
+                        Icon(if (liked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = "پسندیدن",
+                            tint = if (liked) Color(0xFFE64A72) else Color.Gray)
+                    }
+                    IconButton(onClick = onDownload, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Download, contentDescription = "دانلود")
+                    }
+                    IconButton(onClick = onOpen, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Info, contentDescription = "جزئیات و منبع")
+                    }
                 }
             }
         }
@@ -193,9 +301,9 @@ private fun PhotoCard(photo: Photo, liked: Boolean, onLike: () -> Unit, onDownlo
 
 private fun downloadPhoto(context: Context, photo: Photo) {
     try {
-        val request = DownloadManager.Request(Uri.parse(photo.url))
+        val request = DownloadManager.Request(Uri.parse(photo.imageUrl))
             .setTitle("Pixora - ${photo.title}")
-            .setDescription("در حال ذخیره عکس")
+            .setDescription("ذخیره عکس از Openverse")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_PICTURES, "Pixora/${photo.id}.jpg")
             .setAllowedOverMetered(true)
