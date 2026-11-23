@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
 private suspend fun searchOpenverse(term: String, page: Int = 1): List<Photo> =
     withContext(Dispatchers.IO) {
         val encoded = URLEncoder.encode(term, "UTF-8")
-        val url = URL("https://api.openverse.org/v1/images/?q=$encoded&page=$page&page_size=30")
+        val url = URL("https://api.openverse.org/v1/images/?q=$encoded&page=$page&page_size=20")
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 12000
