@@ -1,0 +1,30 @@
+[
+  {
+    "id": "tools",
+    "name": "ابزارها"
+  },
+  {
+    "id": "education",
+    "name": "آموزشی"
+  },
+  {
+    "id": "games",
+    "name": "بازی‌ها"
+  },
+  {
+    "id": "communication",
+    "name": "ارتباطات"
+  },
+  {
+    "id": "multimedia",
+    "name": "چندرسانه‌ای"
+  },
+  {
+    "id": "productivity",
+    "name": "بهره‌وری"
+  },
+  {
+    "id": "other",
+    "name": "سایر"
+  }
+]
