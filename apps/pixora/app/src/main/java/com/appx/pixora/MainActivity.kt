@@ -75,50 +75,44 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Search Wikimedia Commons. It is a public image library and does not require an API key. */
-private suspend fun searchCommons(term: String): List<Photo> = withContext(Dispatchers.IO) {
-    val encoded = URLEncoder.encode("filetype:bitmap $term", "UTF-8")
-    val endpoint = "https://commons.wikimedia.org/w/api.php?action=query&format=json" +
-        "&generator=search&gsrsearch=$encoded&gsrnamespace=6&gsrlimit=30" +
-        "&prop=imageinfo&iiprop=url%7Cextmetadata&iiurlwidth=640"
+/** Search Flickr's public photo feed. No API key is required. */
+private suspend fun searchFlickr(term: String): List<Photo> = withContext(Dispatchers.IO) {
+    val encoded = URLEncoder.encode(term.trim().ifBlank { "nature" }, "UTF-8")
+    val endpoint = "https://www.flickr.com/services/feeds/photos_public.gne" +
+        "?format=json&nojsoncallback=1&tagmode=any&tags=$encoded"
     val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
         requestMethod = "GET"
         connectTimeout = 15000
         readTimeout = 20000
         setRequestProperty("Accept", "application/json")
-        setRequestProperty("User-Agent", "PixoraAndroid/1.0 (Android image gallery)")
+        setRequestProperty("User-Agent", "PixoraAndroid/1.0")
     }
     try {
         if (connection.responseCode !in 200..299) {
-            throw IllegalStateException("سرویس Wikimedia پاسخ نداد (${connection.responseCode})")
+            throw IllegalStateException("سرویس Flickr پاسخ نداد (${connection.responseCode})")
         }
         val body = connection.inputStream.bufferedReader().use { it.readText() }
-        val pages = JSONObject(body).optJSONObject("query")?.optJSONObject("pages")
-            ?: return@withContext emptyList()
+        val items = JSONObject(body).optJSONArray("items") ?: return@withContext emptyList()
         buildList {
-            val keys = pages.keys()
-            while (keys.hasNext()) {
-                val page = pages.optJSONObject(keys.next()) ?: continue
-                val info = page.optJSONArray("imageinfo")?.optJSONObject(0) ?: continue
-                val original = info.optString("url")
-                val thumb = info.optString("thumburl").ifBlank { original }
-                if (!original.startsWith("https://") || !thumb.startsWith("https://")) continue
-                val metadata = info.optJSONObject("extmetadata")
-                fun metadataText(key: String): String {
-                    val raw = metadata?.optJSONObject(key)?.optString("value").orEmpty()
-                    return Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString()
-                        .replace(Regex("\\s+"), " ").trim()
-                }
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+                val mediaUrl = item.optJSONObject("media")?.optString("m").orEmpty()
+                if (!mediaUrl.startsWith("https://")) continue
+                val fullUrl = mediaUrl.replace("_m.", "_b.")
+                val authorRaw = item.optString("author")
+                val author = Regex("\\((.*?)\\)").find(authorRaw)?.groupValues?.getOrNull(1)
+                    ?: authorRaw.substringBefore("@").ifBlank { "نامشخص" }
+                val title = item.optString("title").ifBlank { "بدون عنوان" }
+                val pageUrl = item.optString("link")
                 add(
                     Photo(
-                        id = page.optString("pageid"),
-                        title = page.optString("title").substringAfter("File:")
-                            .ifBlank { "بدون عنوان" },
-                        thumbnail = thumb,
-                        imageUrl = original,
-                        pageUrl = info.optString("descriptionurl"),
-                        creator = metadataText("Artist").ifBlank { "نامشخص" },
-                        license = metadataText("LicenseShortName").ifBlank { "مجوز را در صفحهٔ منبع بررسی کن" }
+                        id = item.optString("link").ifBlank { mediaUrl },
+                        title = title,
+                        thumbnail = mediaUrl,
+                        imageUrl = fullUrl,
+                        pageUrl = pageUrl,
+                        creator = author,
+                        license = "شرایط استفاده را در صفحهٔ عکس بررسی کن"
                     )
                 )
             }
@@ -153,7 +147,7 @@ private fun PixoraApp(incomingUri: Uri?) {
         loading = true
         error = null
         try {
-            photos = searchCommons(submittedQuery)
+            photos = searchFlickr(submittedQuery)
         } catch (e: Exception) {
             error = e.message ?: "ارتباط با سرویس عکس برقرار نشد."
             photos = emptyList()
@@ -186,7 +180,7 @@ private fun PixoraApp(incomingUri: Uri?) {
                             Text(if (selectedPhoto == null) "Pixora" else "جزئیات عکس",
                                 fontWeight = FontWeight.ExtraBold)
                             Text(
-                                if (selectedPhoto == null) "جست‌وجو در Wikimedia Commons" else "اطلاعات و دریافت تصویر",
+                                if (selectedPhoto == null) "جست‌وجو در Flickr" else "اطلاعات و دریافت تصویر",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
@@ -267,7 +261,7 @@ private fun PixoraApp(incomingUri: Uri?) {
                         error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(error ?: "خطا")
-                                Text("اتصال به Wikimedia Commons ممکن است موقتاً برقرار نباشد.")
+                                Text("اتصال به Flickr ممکن است موقتاً برقرار نباشد.")
                                 Button(onClick = { submittedQuery = query.trim().ifBlank { "nature" } }) {
                                     Text("تلاش دوباره")
                                 }
@@ -359,7 +353,7 @@ private fun PhotoDetails(
             Text("مشاهده صفحهٔ اصلی و شرایط مجوز")
         }
         Text(
-            "تصاویر از Wikimedia Commons هستند. پیش از استفادهٔ دوباره، شرایط مجوز هر تصویر را در صفحهٔ منبع بخوان.",
+            "تصاویر از فید عمومی Flickr دریافت می‌شوند. پیش از استفادهٔ دوباره، شرایط مجوز هر تصویر را در صفحهٔ منبع بخوان.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 12.dp, bottom = 24.dp)
@@ -425,7 +419,7 @@ private fun downloadPhoto(context: Context, photo: Photo) {
         }
         val request = DownloadManager.Request(imageUri)
             .setTitle("Pixora - ${photo.title}")
-            .setDescription("ذخیره از Wikimedia Commons در پوشهٔ Downloads")
+            .setDescription("ذخیره از Flickr در پوشهٔ Downloads")
             .setMimeType(mime)
             .addRequestHeader("User-Agent", "PixoraAndroid/1.0")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
