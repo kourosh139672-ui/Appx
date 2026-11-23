@@ -313,6 +313,7 @@ private fun PhotoDetails(
     onDownload: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     Column(modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         AsyncImage(
             model = photo.imageUrl,
@@ -347,7 +348,7 @@ private fun PhotoDetails(
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(photo.pageUrl))
                     // The source page is opened only after the user taps this button.
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    LocalContext.current.startActivity(intent)
+                    context.startActivity(intent)
                 }
             },
             modifier = Modifier.fillMaxWidth(),
